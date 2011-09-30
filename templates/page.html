@@ -1,0 +1,89 @@
+<!doctype html>
+<!--[if lt IE 7 ]> <html class="no-js ie6" lang="en"> <![endif]-->
+<!--[if IE 7 ]>    <html class="no-js ie7" lang="en"> <![endif]-->
+<!--[if IE 8 ]>    <html class="no-js ie8" lang="en"> <![endif]-->
+<!--[if (gte IE 9)|!(IE)]><!--> <html class="no-js" lang="en"> <!--<![endif]-->
+<head>
+  <meta charset="utf-8">
+  <meta http-equiv="X-UA-Compatible" content="IE=edge,chrome=1">
+
+  <title>Au-To-Do</title>
+  <meta name="description" content="">
+  <meta name="author" content="">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+
+  <link rel="shortcut icon" type="image/x-icon" href="/images/theme/icons/autodo.ico" />
+  <!-- HTML 5 Boilerplate -->
+  <link rel="stylesheet" href="/css/base_style.css?v=2">
+  <!-- Au-to-do specific styles -->
+  <link rel="stylesheet" href="/css/style.css">
+
+  <script type="text/javascript" src="//ajax.googleapis.com/ajax/libs/jquery/1.5.1/jquery.js"></script>
+  <script type="text/javascript" src="//ajax.googleapis.com/ajax/libs/jqueryui/1.8.13/jquery-ui.js"></script>
+
+  <!-- JavaScript for UI elements  -->
+  <script type="text/javascript" src="/js/ui.js"></script>
+  <script type="text/javascript">
+    var filters = [];
+    {% for filter in filters %}
+    filters.push("{{filter}}=");
+    {% endfor %}
+    var currentUser = '{{ owner }}';
+  </script>
+</head>
+
+<body>
+  <div id="container">
+    <header>
+      <div id="logo"></div>
+      <input type="text" id="search-box"></input>
+      <a class="atd-button atd-search-button" style="margin-top: 10px;">
+        <img src="/images/theme/icons/search-white.png" />
+      </a>
+    </header>
+      <div id="options_bar">
+        <div id="app_title">Au-to-do</div>
+          <a class="select-button atd-button no-margin" data-tooltip="Select">
+            <input type="checkbox" id="toggle-all" />
+          </a>
+        <a class="reload-button atd-button" data-tooltip="Reload"><img src="/images/theme/icons/reload.png" /></a>
+        <a class="resolve-button atd-button" data-tooltip="Resolve">Resolve</a>
+        <a class="menu-button atd-button" id="assign-button" data-tooltip="Assign"><span class="atd-button-label">Assign</span><span class="atd-arrow"></span></a>
+        <a class="menu-button atd-button" id="label-button" data-tooltip="Label"><span class="atd-button-label">Label</span><span class="atd-arrow"></span></a>
+        <a class="settings-button atd-button no-margin right" data-tooltip="Settings"><img src="/images/theme/icons/options.png" /></a>
+      </div>
+      <div id="sidebar">
+        {% block sidebar %}
+        <ul>
+          <li class="selected mine" name="{{ owner }}">Mine</li>
+          <li class="unassigned">Unassigned</li>
+          <li class="resolved">Resolved</li>
+          <li class="all">All</li>
+        </ul>
+        {% endblock %}
+      </div>
+    <div id="main" role="main">
+      <div id="content">
+        {% block incident %}
+        {% endblock %}
+      </div>
+    </div>
+  </div>
+  <div id="assign-options" class="options-popup">
+    <div class="options-menu">
+      <input type="text" />
+      <a id="assign-owner"><span style="padding-left: 16px;">Assign</span></a>
+    </div>
+  </div>
+  <div id="label-options" class="options-popup">
+    <div class="options-menu">
+      <input type="text" /><br />
+      <div class="options-checkboxes">
+      </div>
+      <a id="apply-tags"><span style="padding-left: 16px;">Apply</span></a>
+   </div>
+  </div>
+  <div id="notificationbar"><span class="message"></span></div>
+  <div id="lastactionbar"><span class="message"></span></div>
+</body>
+</html>

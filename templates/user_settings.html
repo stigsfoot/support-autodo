@@ -1,0 +1,90 @@
+<link rel="stylesheet" href="/css/style.css">
+
+<div>
+  {% if is_admin %}
+  <p>
+    {% if credentials_email %}
+    Au-to-do is currently using <strong>{{ credentials_email }}</strong> credentials.
+    {% else %}
+    <strong>No</strong> credentials currently in use for Au-to-do.
+    {% endif %}
+    {% ifequal current_user credentials_email %}
+    <button class="credentials-button" OnClick="grantAccess()">Refresh my credentials</button>
+    {% else %}
+    <button class="credentials-button" OnClick="grantAccess()">Use my credentials</button>
+    {% endifequal %}
+  </p>
+
+  {% if is_local %}
+  <hr />
+  <p>
+    It appears Au-to-do is running locally. You may optionally reset the datastore contents.
+    <button class="reset-button" onclick="datastoreReset();">Reset the datastore</button>
+  </p>
+  {% endif %}
+
+  <script type="text/javascript">
+    function grantAccess() {
+      window.open("/oauth", "mywindow", "status=1,width=400,height=300");
+    }
+
+    function onAccessGranted() {
+      google.devrel.samples.autodo.Render.settingsList();
+    }
+    
+    function datastoreReset() {
+      $.ajax({
+        url: '/ds_reset',
+        type: 'POST'
+      });
+    }
+  </script>
+  {% endif %}
+</div>
+
+<div>
+  <hr>
+  <h2>Current Models and Tags</h2>
+  <form method="post" action="/tasks/train">
+    <input type="hidden" name="action" value="refresh" />
+    <input type="submit" value="Train" />
+  </form>
+  <table>
+    <tr><th>Model Name</th><th>Exported Examples</th>
+      <th>Exported</th><th>Tags</th><th>Previous File Name</th>
+      {% if is_admin %}
+      <th>Download</th>
+      {% endif %}
+    </tr>
+  {% for model in models %}
+    <tr>
+      <td>{{ model.name }}</td>
+      <td>{{ model.export_examples|default:"unknown" }}</td>
+      <td>{{ model.export_date|date:"SHORT_DATETIME_FORMAT"|default:"never" }}
+      </td>
+      <td><ul>{% for tag in model.ui_tags %}
+        <li>{{ tag }}</li>
+        {% endfor %}</ul></td>
+      <td>{{ model.export_file|default:"unknown" }}</td>
+      {% if is_admin %}
+      <td>
+        <form method="post" action="/tasks/train">
+          <input type="hidden" name="action" value="csv" />
+          <input type="hidden" name="model_name" value="{{ model.name }}" />
+          <input type="submit" value="csv" />
+        </form>
+      </td>
+      {% endif %}
+    </tr>
+  {% endfor %}
+  </table>
+</div>
+
+<div>
+  <h2>Training Status</h2>
+  <ul>
+  {% for name,state in status.items %}
+  <li>{{ name }} : {{ state }}</li>
+  {% endfor %}
+  </ul>
+</div>

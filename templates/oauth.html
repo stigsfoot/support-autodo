@@ -1,0 +1,19 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <title>Au-to-do</title>
+    <script type="text/javascript">
+      function closeWindow() {
+        if (window.opener &&
+            typeof(window.opener.onAccessGranted) == 'function') {
+          window.opener.onAccessGranted();
+          window.close();
+        } else {
+          window.location = "/";
+        }
+      }
+    </script>
+  </head>
+  <body onLoad="closeWindow()">
+  </body>
+</html>

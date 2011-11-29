@@ -44,8 +44,86 @@ google.devrel.samples.autodo.Bindings =
     google.devrel.samples.autodo.Bindings || {};
 
 /** Data object for persisting server data on the client. */
-google.devrel.samples.autodo.Data =
-    google.devrel.samples.autodo.Data || {};
+google.devrel.samples.autodo.Data = google.devrel.samples.autodo.Data || {};
+
+/**
+ * Stack for maintaining the UI page history (for back buttons).
+ * @type {Array}
+ */
+google.devrel.samples.autodo.Data.hashStack = new Array();
+
+/** Generic logging functionality. */
+google.devrel.samples.autodo.Logger = google.devrel.samples.autodo.Logger || {};
+
+/**
+ * Lowest logging level, for debugging.
+ * @type {number}
+ */
+google.devrel.samples.autodo.Logger.DEBUG = 3;
+
+/**
+ * Middle logging level, for informational messages, during normal operation.
+ * @type {number}
+ */
+google.devrel.samples.autodo.Logger.INFO = 2;
+
+/**
+ * Warning log level, for when things go wrong.
+ * @type {number}
+ */
+google.devrel.samples.autodo.Logger.WARN = 1;
+
+/**
+ * No logging level, default.
+ * @type {number}
+ */
+google.devrel.samples.autodo.Logger.NONE = 0;
+
+/**
+ * The default logging level.
+ * @type {number}
+ */
+google.devrel.samples.autodo.Logger.level =
+    google.devrel.samples.autodo.Logger.NONE;
+
+/** Enum of fixed incident queries. */
+google.devrel.samples.autodo.Query = google.devrel.samples.autodo.Query || {};
+
+/**
+ * Query for all incidents.
+ * @type {string}
+ */
+google.devrel.samples.autodo.Query.ALL = 'all';
+
+/**
+ * Query for an incident by ID.
+ * @type {string}
+ */
+google.devrel.samples.autodo.Query.ID = 'id';
+
+/**
+ * Query for 'my' incidents.
+ * @type {string}
+ */
+google.devrel.samples.autodo.Query.MINE = 'mine';
+
+/**
+ * Query for resolved incidents.
+ * @type {string}
+ */
+google.devrel.samples.autodo.Query.RESOLVED = 'resolved';
+
+/**
+ * Query for the settings page.
+ * @type {string}
+ */
+google.devrel.samples.autodo.Query.SETTINGS = 'settings';
+
+/**
+ * Query for unassigned incidents.
+ * @type {string}
+ */
+google.devrel.samples.autodo.Query.UNASSIGNED = 'unassigned';
 
 /** Render object for rendering content. */
 google.devrel.samples.autodo.Render =
@@ -59,6 +137,8 @@ google.devrel.samples.autodo.Util =
 var ApiClient = google.devrel.samples.autodo.ApiClient;
 var Bindings = google.devrel.samples.autodo.Bindings;
 var Data = google.devrel.samples.autodo.Data;
+var Logger = google.devrel.samples.autodo.Logger;
+var Query = google.devrel.samples.autodo.Query;
 var Render = google.devrel.samples.autodo.Render;
 var Util = google.devrel.samples.autodo.Util;
 
@@ -75,12 +155,30 @@ google.devrel.samples.autodo.ApiClient.BASE_URI = '/resources/v1/incidents/';
 google.devrel.samples.autodo.ApiClient.DEFAULT_SEARCH = '';
 
 /**
+ * Special search token to be used for searching by ID.
+ * @type {string}
+ */
+google.devrel.samples.autodo.ApiClient.ID_TOKEN = 'id=';
+
+/**
  * The last parameters used to call the autodo API.
  * meant for use with nav elements (i.e."back" button).
  * @type {string}
  */
 google.devrel.samples.autodo.ApiClient.currentListView =
     ApiClient.DEFAULT_SEARCH;
+
+/**
+ * Logs a message if it has sufficiently high priority.
+ * @param {string} message Message to log.
+ * @param {number} opt_priority Optional priority to use for the message.
+ */
+google.devrel.samples.autodo.Logger.log = function(message, opt_priority) {
+  opt_priority = opt_priority || Logger.DEBUG;
+  if (opt_priority <= Logger.level && console && console.log) {
+    console.log(message);
+  }
+};
 
 /**
  * Displays the list of incidents, represented by the currentListView. If a
@@ -109,6 +207,23 @@ google.devrel.samples.autodo.ApiClient.listView = function(opt_options) {
 };
 
 /**
+ * Retrieves and displays a single incident, represented by id.
+ * @param {string} id The id to retrieve and display.
+ */
+google.devrel.samples.autodo.ApiClient.singleView = function(id) {
+  Render.showInfoMessage('Loading Incident...');
+  var uri = ApiClient.BASE_URI;
+  uri += id;
+
+  $.ajax({
+    url: uri,
+    type: 'GET',
+    dataType: 'json',
+    success: Render.singleIncident
+  });
+};
+
+/**
  * Returns data from an API request for info about a single incident.
  * @param {string} id The id of a single incident.
  * @param {string} callback The callback function to send data to upon success.
@@ -128,15 +243,6 @@ google.devrel.samples.autodo.ApiClient.getIncidentData = function(
 };
 
 /**
- * Calls the autodo API for a particular incident.
- * @param {Object} data Data representation of an incident.
- */
-google.devrel.samples.autodo.ApiClient.incidentView = function(data) {
-  Render.showInfoMessage('Loading Incident...');
-  Render.singleIncident(data);
-};
-
-/**
  * Calls the autodo API with the input search terms.
  */
 google.devrel.samples.autodo.ApiClient.search = function() {
@@ -151,11 +257,17 @@ google.devrel.samples.autodo.ApiClient.search = function() {
 
       if (Util.regex.test(token)) {
         if (++i < tokens.length) {
-          queries.push(token + escape(tokens[i].trim()));
+          if (token == ApiClient.ID_TOKEN) {
+            Util.setHashPair(token + escape(tokens[i].trim()));
+            return;
+          } else {
+            queries.push(token + escape(tokens[i].trim()));
+          }
         }
       }
     }
 
+    Util.setHashPair(queries.join(' '));
     ApiClient.listView(queries.join('&'));
   }
 };
@@ -176,7 +288,28 @@ google.devrel.samples.autodo.ApiClient.assignIncident = function(data, owner) {
     success: function(data) {
       // Reset incident cache.
       Data.incidentListUpdated = 0;
-      ApiClient.listView(ApiClient.currentListView);
+      Util.reloadCurrentHash();
+    }
+  });
+};
+
+/**
+ * Calls the autodo API to resolve an incident.
+ * @param {Object} data Data representation of an incident.
+ */
+google.devrel.samples.autodo.ApiClient.resolveIncident = function(data) {
+  Render.showInfoMessage('Resolving incident...');
+  data.resolved = (new Date).toISOString();
+  data.status = 'resolved';
+  $.ajax({
+    url: ApiClient.BASE_URI + data.id,
+    type: 'PUT',
+    data: JSON.stringify(data),
+    contentType: 'application/json',
+    success: function(data) {
+      // Reset incident cache.
+      Data.incidentListUpdated = 0;
+      Util.reloadCurrentHash();
     }
   });
 };
@@ -223,12 +356,46 @@ google.devrel.samples.autodo.ApiClient.updateIncidentTags = function(
  * @return {boolean} Whether to use the cache (true) or not.
  */
 google.devrel.samples.autodo.ApiClient.useIncidentCache = function() {
-  now = new Date().getTime();
-  delta = now - Data.incidentListUpdated;
-  shouldUseIncidentCache = delta > Data.INCIDENT_CACHE_LENGTH * 1000 ||
+  var now = new Date().getTime();
+  var delta = now - Data.incidentListUpdated;
+  var shouldUseIncidentCache = delta > Data.INCIDENT_CACHE_LENGTH * 1000 ||
       ApiClient.currentListView != Data.incidentListType ||
       !Data.USE_INCIDENT_CACHE;
   return shouldUseIncidentCache;
+};
+
+/**
+ * Retrieves user settings.
+ */
+google.devrel.samples.autodo.ApiClient.getUserSettings = function() {
+  $.ajax({
+    url: '/resources/v1/userSettings',
+    type: 'GET',
+    dataType: 'json',
+    success: Render.showUserSettings,
+    statusCode: {
+      404: function() {
+          Render.showUserSettings(null);
+      }
+    }
+  });
+};
+
+/**
+ * Save user settings.
+ */
+google.devrel.samples.autodo.ApiClient.saveUserSettings = function() {
+  var data = {
+    'addToTasks': $('#userSettings_addToTasks')[0].checked,
+    'taskListId': $('#userSettings_taskList').val()
+  };
+  $.ajax({
+    url: '/resources/v1/userSettings',
+    type: 'PUT',
+    data: JSON.stringify(data),
+    dataType: 'json',
+    success: Render.showUserSettings
+  });
 };
 
 /**
@@ -280,13 +447,16 @@ google.devrel.samples.autodo.Render.showInfoMessage = function(message) {
  * Replaces the toggle checkbox with a back button.
  */
 google.devrel.samples.autodo.Render.backButton = function() {
+  Logger.log('rendered back button');
   $('a.select-button').replaceWith(
     '<a class="back-button atd-button no-margin"' +
     'data-tooltip="Back to Case List">' +
     '<img src="/images/theme/icons/back.gif" /></a>'
   );
+  $('a.back-button').unbind('click');
   $('a.back-button').click(function() {
-    ApiClient.listView(ApiClient.currentListView);
+    Logger.log('pushed back');
+    Render.loadPreviousHashPair();
   });
 };
 
@@ -410,21 +580,21 @@ google.devrel.samples.autodo.Bindings.findCheckedTagOptions = function() {
 google.devrel.samples.autodo.Bindings.findIncidentTags = function(
     incidentElement) {
   var incidentTags = {};
-  optionsTagsList = Bindings.findCheckedTagOptions();
-  incidentTags.id = parseInt(incidentElement.attr('value'));
+  var optionsTagsList = Bindings.findCheckedTagOptions();
+  incidentTags.id = parseInt(incidentElement.attr('value'), 10);
   incidentTags.accepted_tags = new Array();
   for (var i = 0; i < optionsTagsList.length; i++) {
     incidentTags.accepted_tags.push(optionsTagsList[i]);
   }
   incidentTags.suggested_tags = [];
   incidentElement.parentsUntil('tr').parent().find('.label').each(function() {
-    if (incidentElement.hasClass('accepted')) {
-      if (jQuery.inArray(incidentElement.attr('value'),
+    if ($(this).hasClass('accepted')) {
+      if (jQuery.inArray($(this).attr('value'),
                          incidentTags.accepted_tags) == -1) {
-        incidentTags.accepted_tags.push(incidentElement.attr('value'));
+        incidentTags.accepted_tags.push($(this).attr('value'));
       }
-    } else if (incidentElement.hasClass('suggested')) {
-      incidentTags.suggested_tags.push(incidentElement.attr('value'));
+    } else if ($(this).hasClass('suggested')) {
+      incidentTags.suggested_tags.push($(this).attr('value'));
     }
   });
   return incidentTags;
@@ -465,10 +635,10 @@ google.devrel.samples.autodo.Render.tagList = function(incidentTd, incident) {
     incidentTd.prepend($('<span>').addClass('label suggested').
         attr('value', tag).append(tag));
   });
-  incidentTd.find('span.suggested').append($('<a>').addClass('accept').attr(
-      'href', '#').html('&#x2713;'));
-  incidentTd.find('span.label').append($('<a>').addClass('remove').attr(
-      'href', '#').html('&#x2717'));
+  incidentTd.find('span.suggested').append($('<a>').addClass('accept').html(
+      '&#x2713;'));
+  incidentTd.find('span.label').append($('<a>').addClass('remove').html(
+       '&#x2717'));
 };
 
 /**
@@ -529,7 +699,7 @@ google.devrel.samples.autodo.Render.singleIncident = function(data) {
   Render.backButton();
   Render.originalButton(data.canonical_link);
   $('#content').empty();
-  incidentTd = $('<td>').css('padding', '10px 0px 10px 0px');
+  var incidentTd = $('<td>').css('padding', '10px 0px 10px 0px');
   // <p> tags are used as throwaway tags for HTML sanitization and don't
   // appear in the UI.
   var titleText = $('<p>').text(data.title).html();
@@ -558,6 +728,63 @@ google.devrel.samples.autodo.Render.singleIncident = function(data) {
 };
 
 /**
+ * Renders the user settings.
+ * @param {Object} opt_data Optional data to display. If null, ask user to grant
+ *                          access.
+ */
+google.devrel.samples.autodo.Render.showUserSettings = function(opt_data) {
+  var div = $('#settings');
+  var setting = $('<div class="setting userSetting">');
+  setting.append($('<h1>').text('User settings'));
+
+  if (opt_data != null) {
+    var checkBox = $('<input>').attr({
+        'type': 'checkbox',
+        'id': 'userSettings_addToTasks',
+        'checked': opt_data['addToTasks']});
+    var button = $('<button>').addClass('atd-button').click(
+        google.devrel.samples.autodo.ApiClient.saveUserSettings).text('Save');
+    setting.append(checkBox);
+    setting.append('Automatically add assigned incidents to my Google ' +
+                   'Tasks.<br/>');
+
+    var tasklists = $('<div>');
+    var combobox = $('<select>').attr({'id': 'userSettings_taskList'});
+    var hasTaskList = false;
+
+    tasklists.append($('<label style="padding-right: 5px;">').text(
+        'Choose task list:'));
+    tasklists.append(combobox);
+    $.each(opt_data.taskLists, function(i, taskList) {
+        combobox.append(
+            $('<option>').attr({'value': taskList.id}).text(taskList.title));
+        if (taskList.id == opt_data.taskListId) {
+          hasTaskList = true;
+        }
+      });
+    if (hasTaskList) {
+      combobox.val(opt_data.taskListId);
+    }
+    setting.append(tasklists);
+    setting.append(button);
+  } else {
+    setting.append(
+        $('<p>').html(
+            $('<p>').
+            append(
+                $('<button>').attr({'class': 'atd-button'}).click(
+                    function() {
+                      Render.showGrantAccessWindow('tasks');
+                    }).text('Grant'))
+            .append(
+                ' Au-to-do access to your Google Tasks to automatically add ' +
+                'assigned incidents to your task list.')));
+  }
+  $('.userSetting').remove();
+  div.append(setting);
+}
+
+/**
  * Renders a list of application settings.
  */
 google.devrel.samples.autodo.Render.settingsList = function() {
@@ -570,6 +797,7 @@ google.devrel.samples.autodo.Render.settingsList = function() {
     success: function(data) {
         $('#content').empty();
         $('#content').append(data);
+        google.devrel.samples.autodo.ApiClient.getUserSettings();
     }
   });
 };
@@ -581,6 +809,15 @@ google.devrel.samples.autodo.Render.settingsList = function() {
 google.devrel.samples.autodo.Render.selectedSidebarLink = function(li) {
   $('#sidebar li').removeClass('selected');
   $(li).addClass('selected');
+};
+
+/**
+ * Display a pop-up window to request access to a Au-to-do required API.
+ * @param {string} api String representing an internal API. Current supported
+ *                     values are 'tasks' and 'prediction' (internal only).
+ */
+google.devrel.samples.autodo.Render.showGrantAccessWindow = function(api) {
+  window.open('/oauth/' + api, 'mywindow', 'status=1,width=400,height=300');
 };
 
 /**
@@ -680,15 +917,28 @@ google.devrel.samples.autodo.Bindings.bindAssignOptions = function() {
     $('#assign-options').hide();
     $('#assign-options').find('input[type="text"]').val('');
   });
-}
+};
+
+/**
+ * Binds the "resolve" button to incident resolving function.
+ */
+google.devrel.samples.autodo.Bindings.bindResolveOptions = function() {
+  $('a.resolve-button').click(function() {
+    // Retrieve incidents that should be updated.
+    $('#content').find('input:checked, div.title.content-list-div').each(
+        function() {
+      ApiClient.getIncidentData($(this).attr('value'),
+                                ApiClient.resolveIncident);
+    });
+  });
+};
 
 /**
  * Binds incidents list elements to render incident views.
  */
 google.devrel.samples.autodo.Bindings.bindIncidentLink = function() {
   $('div.content-list-div').click(function() {
-    var id = $(this).attr('value');
-    ApiClient.getIncidentData(id, ApiClient.incidentView);
+    Util.setHashPair('id=' + $(this).attr('value'));
   });
 };
 
@@ -700,16 +950,16 @@ google.devrel.samples.autodo.Bindings.bindSideBar = function() {
     Render.selectedSidebarLink($(this));
   });
   $('li.mine').click(function() {
-    ApiClient.listView('owner=' + currentUser);
+    Util.setHashPair(Query.MINE);
   });
   $('li.unassigned').click(function() {
-    ApiClient.listView('owner=none');
+    Util.setHashPair(Query.UNASSIGNED);
   });
   $('li.resolved').click(function() {
-    ApiClient.listView();
+    Util.setHashPair(Query.RESOLVED);
   });
   $('li.all').click(function() {
-    ApiClient.listView('owner=');
+    Util.setHashPair(Query.ALL);
   });
 };
 
@@ -779,7 +1029,7 @@ google.devrel.samples.autodo.Bindings.bindReloadButton = function() {
   $('a.reload-button').click(function() {
     // Reset incident cache.
     Data.incidentListUpdated = 0;
-    ApiClient.listView(ApiClient.currentListView);
+    Util.reloadCurrentHash();
   });
 };
 
@@ -835,7 +1085,7 @@ google.devrel.samples.autodo.Bindings.bindRemoveTags = function() {
  */
 google.devrel.samples.autodo.Bindings.bindSettingsButton = function() {
   $('a.settings-button').click(function() {
-    Render.settingsList();
+    Util.setHashPair(Query.SETTINGS);
   });
 };
 
@@ -910,6 +1160,122 @@ google.devrel.samples.autodo.Bindings.bindLastActionBar = function() {
 };
 
 /**
+ * Binds the HTML5 hashchange event to appropriate UI logic.
+ */
+google.devrel.samples.autodo.Bindings.bindHashChange = function() {
+  $(window).bind('hashchange', function() {
+    var hash = window.location.hash;
+    var last = Data.hashStack[Data.hashStack.length - 1];
+    if (hash != last) {
+      Data.hashStack.push(hash);
+      Logger.log('pushed to stack');
+      Logger.log(Data.hashStack);
+    }
+
+    var hashPair = Util.getHashPair();
+    switch (hashPair.key) {
+      case Query.ALL:
+        ApiClient.listView('owner=');
+        break;
+      case Query.MINE:
+        ApiClient.listView('owner=' + currentUser);
+        break;
+      case Query.UNASSIGNED:
+        ApiClient.listView('owner=none');
+        break;
+      case Query.RESOLVED:
+        // Skip for now.
+        break;
+      case Query.ID:
+        ApiClient.singleView(hashPair.value);
+        break;
+      case Query.SETTINGS:
+        Render.settingsList();
+        break;
+      default:
+        $('input#search-box').val(hashPair.key + '=' + hashPair.value);
+        ApiClient.search();
+    }
+    var button = $('#sidebar').find('li' + '.' + hashPair.key);
+    if (button) {
+      Render.selectedSidebarLink(button);
+    }
+  });
+};
+
+/**
+ * Returns a parsed key/value pair representing the window's location.hash.
+ * @return {Object} An object containing the key (object.key) and value
+ *                  (object.value).
+ */
+google.devrel.samples.autodo.Util.getHashPair = function() {
+  var fragment = window.location.hash;
+  var sub = fragment.substring(1, fragment.length);
+  var split = sub.split('=');
+  return {
+    key: split[0],
+    value: split[1]
+  };
+};
+
+/**
+ * Set a new hash fragment from the supplied key and/or value.
+ * @param {string=} opt_key Optional hash fragment key.
+ * @param {string=} opt_value Optional hash fragment value.
+ */
+google.devrel.samples.autodo.Util.setHashPair = function(opt_key, opt_value) {
+  var setter;
+  if (opt_value) {
+    setter = '=';
+  }
+  var hash = ['#', opt_key, setter, opt_value].join('');
+  window.location.hash = hash;
+};
+
+/**
+ * Set the hash fragment to the previous entry in the stack.
+ */
+google.devrel.samples.autodo.Render.loadPreviousHashPair = function() {
+  Data.hashStack.pop();
+  var top = Data.hashStack[Data.hashStack.length - 1];
+  if (top) {
+    window.location.hash = top;
+  } else {
+    window.location.hash = '';
+  }
+  Logger.log('popped stack');
+  Logger.log(Data.hashStack);
+};
+
+/**
+ * "Reloads" the current hash fragment, by trigger the hash change event.
+ *
+ * This behaves like a page reload which might be useful when trigger an
+ * updated version of the current view.
+ */
+google.devrel.samples.autodo.Util.reloadCurrentHash = function() {
+  Logger.log('reloading hash');
+  var hashPair = Util.getHashPair();
+  if (hashPair.key != Query.ID) {
+    Logger.log('triggering hashchange');
+    $(window).trigger('hashchange');
+  }
+};
+
+/**
+ * Renders the initial page view, either from hash or the default view.
+ */
+google.devrel.samples.autodo.Render.setInitialView = function() {
+  Data.hashStack.push(Query.MINE);
+  if (!window.location.hash) {
+    Util.setHashPair('mine');
+  } else {
+    Util.setHashPair(window.location.hash.substring(1));
+    $(window).trigger('hashchange');
+  }
+};
+
+/**
  * Converts database timestamps into a slightly more readable form.
  * TODO(user): add 12-hour formating.
  * @param {string} dateStamp A timestamp in YYYY-MM-DDTHH:MM:SS format.
@@ -919,12 +1285,11 @@ google.devrel.samples.autodo.Util.formatDateStamp = function(dateStamp) {
   var arrDateTime = dateStamp.split('T');
   var arrDate = arrDateTime[0].split('-');
   var arrTime = arrDateTime[1].split(':');
-  month = Util.removeLeadingZeroes(arrDate[1]);
-  day = Util.removeLeadingZeroes(arrDate[2]);
-  hour = Util.removeLeadingZeroes(arrTime[0]);
-  minute = arrTime[1];
-  formattedString = month + '/' + day +
-                    ' ' + hour + ':' + minute;
+  var month = Util.removeLeadingZeroes(arrDate[1]);
+  var day = Util.removeLeadingZeroes(arrDate[2]);
+  var hour = Util.removeLeadingZeroes(arrTime[0]);
+  var minute = arrTime[1];
+  var formattedString = month + '/' + day + ' ' + hour + ':' + minute;
   return formattedString;
 };
 
@@ -951,6 +1316,14 @@ google.devrel.samples.autodo.Util.removeLeadingZeroes = function(
   return timeStampElement;
 };
 
+/**
+ * Handles OAuth pop-up callback. Current implementation reloads the settings
+ * page.
+ */
+google.devrel.samples.autodo.Util.onAccessGranted = function() {
+  google.devrel.samples.autodo.Render.settingsList();
+};
+
 $(document).ready(function() {
   ApiClient.DEFAULT_SEARCH = 'owner=' + currentUser;
   // Initializes UI element bindings, loads default view.
@@ -960,15 +1333,17 @@ $(document).ready(function() {
   Bindings.bindTagTextInput();
   Bindings.bindTagOptions();
   Bindings.bindAssignOptions();
+  Bindings.bindResolveOptions();
   Bindings.bindNotificationBar();
   Bindings.bindLastActionBar();
   Bindings.bindSideBar();
   Bindings.bindSearchInputs();
+  Bindings.bindHashChange();
   // Positions the pop-up option menus.
   Render.popUpPosition();
-  // Loads the default view.
-  ApiClient.listView();
   // Initialize the tokenizer Regex.
   Util.initializeRegex();
+  // Trigger a hash change if we arrived with a hash fragment, otherwise load
+  // the default view.
+  Render.setInitialView();
 });
-

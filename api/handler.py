@@ -25,11 +25,16 @@ from google.appengine.dist import use_library
 use_library('django', '1.2')
 
 from django.utils import simplejson
+from apiclient import errors
+from apiclient.discovery import build
+from google.appengine.api import users
 from google.appengine.ext import db
 from google.appengine.ext import webapp
 from iso8601 import parse_date
 from google.appengine.ext.webapp.util import run_wsgi_app
+import httplib2
 import model
+import tasks_utils
 
 
 class IncidentError(Exception):
@@ -55,6 +60,118 @@ class InvalidDateError(IncidentError):
 class IncidentNotFoundError(IncidentError):
   """Raised if an Incident for the given ID cannot be found."""
   pass
+
+
+class UserSettingsError(Exception):
+  """Base class for any errors handling UserSettings."""
+  pass
+
+
+class UserOrSettingsNotFoundError(UserSettingsError):
+  """Raised if a User is not logged-in or has no settings."""
+  pass
+
+
+# TODO(user): Add admin settings as well in the API.
+class UserSettingsHandler(webapp.RequestHandler):
+  """Handles all RESTful operations on UserSettings."""
+
+  def _HandleUserOrSettingsNotFoundError(self):
+    """Handle an UserOrSettingsNotFoundError, yield an HTTP 404."""
+    self.response.clear()
+    self.response.set_status(404)
+    self.response.out.write(
+        'Settings for the user could not be found.')
+
+  def _HandleBadRequestError(self):
+    """Handle a bad request, yield an HTTP 400."""
+    self.response.clear()
+    self.response.set_status(400)
+    self.response.out.write(
+        'Bad request.')
+
+  def _GetUserSettings(self):
+    """Return the current user's settings.
+
+    Returns:
+      User's settings.
+    Raises:
+      UserOrSettingsNotFoundError: No user or settings were found.
+    """
+    user = users.get_current_user()
+    settings = None
+    if user:
+      settings = model.UserSettings.get_by_key_name(user.email())
+    if settings:
+      return settings
+    else:
+      raise UserOrSettingsNotFoundError()
+
+  def _DumpResults(self, settings, task_lists=None):
+    """Dumps the settings into a JSON object.
+
+    Args:
+      settings: Current user's settings.
+      task_lists: Task lists to append to the result.
+    """
+    result = {
+        'addToTasks': settings.add_to_tasks,
+        'taskListId': settings.task_list_id,
+        'taskLists': task_lists or []
+    }
+    self.response.out.write(simplejson.dumps(result))
+
+  def _GetTaskLists(self, credentials):
+    """Retrieve user's tasklists.
+
+    Args:
+      credentials: User's credentials.
+    Returns:
+      List of task lists.
+    """
+    try:
+      client = build('tasks', 'v1', http=credentials.authorize(httplib2.Http()))
+      tasklists = client.tasklists().list().execute()
+      return [{'id': x['id'], 'title': x['title']} for x in tasklists['items']]
+    except errors.HttpError:
+      return []
+
+  def get(self):
+    """Retrieve all settings for the current user."""
+    try:
+      settings = self._GetUserSettings()
+      self._DumpResults(
+          settings, self._GetTaskLists(settings.tasks_credentials))
+    except UserOrSettingsNotFoundError:
+      self._HandleUserOrSettingsNotFoundError()
+
+  def put(self):
+    """Update all provided settings for the current user."""
+    try:
+      settings = self._GetUserSettings()
+      body = simplejson.loads(self.request.body)
+      task_lists = self._GetTaskLists(settings.tasks_credentials)
+      add_to_tasks = body.get('addToTasks')
+      if add_to_tasks is not None:
+        logging.info('Setting addToTasks to %s', add_to_tasks)
+        settings.add_to_tasks = add_to_tasks
+      task_list_id = body.get('taskListId')
+      if task_list_id is not None:
+        found = False
+        for task_list in task_lists:
+          if task_list['id'] == task_list_id:
+            found = True
+            break
+        if not found:
+          raise ValueError()
+        settings.task_list_id = task_list_id
+      logging.info('Saving.')
+      settings.put()
+      self._DumpResults(settings, task_lists)
+    except ValueError:
+      self._HandleBadRequestError()
+    except UserOrSettingsNotFoundError:
+      self._HandleUserOrSettingsNotFoundError()
 
 
 class IncidentHandler(webapp.RequestHandler):
@@ -196,6 +313,7 @@ class IncidentHandler(webapp.RequestHandler):
       incident = model.Incident.FromJson(self.request.body)
       incident.id = None
       incident.put()
+      tasks_utils.AddTask(incident)
       model.Tag.CreateMissingTags(incident)
       self.response.set_status(201)
     except db.Error, e:
@@ -206,9 +324,10 @@ class IncidentHandler(webapp.RequestHandler):
     try:
       incident = self._GetIncidentByUriId()
       new_incident = model.Incident.FromJson(self.request.body)
-      incident.Merge(new_incident)
+      incident.Overlay(new_incident)
       incident.put()
       incident.PurgeJsonCache()
+      tasks_utils.UpdateTask(incident)
       model.Tag.CreateMissingTags(incident)
       self.response.set_status(204)
     except IncidentNotFoundError:
@@ -220,6 +339,7 @@ class IncidentHandler(webapp.RequestHandler):
     """Delete the Incident with the given ID."""
     try:
       incident = self._GetIncidentByUriId()
+      tasks_utils.DeleteTask(incident)
       incident.delete()
       self.response.set_status(204)
     except IncidentNotFoundError:
@@ -317,7 +437,10 @@ INCIDENT_FILTERS = [
 def main():
   """Runs the application."""
   application = webapp.WSGIApplication(
-      [('/resources/v1/incidents.*', IncidentHandler)],
+      [
+          ('/resources/v1/incidents.*', IncidentHandler),
+          ('/resources/v1/userSettings', UserSettingsHandler)
+      ],
       debug=True)
   run_wsgi_app(application)
 

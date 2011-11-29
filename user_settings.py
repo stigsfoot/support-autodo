@@ -21,6 +21,7 @@
 import os
 import re
 from apiclient.discovery import build
+from oauth2client import client
 from google.appengine.api import users
 from google.appengine.ext import webapp
 from google.appengine.ext.webapp import template
@@ -70,13 +71,16 @@ class UserSettingsPage(webapp.RequestHandler):
       http = httplib2.Http()
       http = credentials.authorize(http)
       service = build('prediction', 'v1.2', http=http)
-      train = service.training()
+      try:
+        train = service.training()
 
-      for suggestion_model in suggestion_models:
-        gs_full_name = '%s/%s' % (settings.GS_BUCKET,
-                                  suggestion_model.training_file)
-        state = train.get(data=gs_full_name).execute()
-        status[suggestion_model.name] = state['trainingStatus']
+        for suggestion_model in suggestion_models:
+          gs_full_name = '%s/%s' % (settings.GS_BUCKET,
+                                    suggestion_model.training_file)
+          state = train.get(data=gs_full_name).execute()
+          status[suggestion_model.name] = state['trainingStatus']
+      except client.AccessTokenRefreshError:
+        status['Failed to retrieve training data'] = 'Refresh credentials'
     else:
       status['Add Credentials to access models'] = '...'
 

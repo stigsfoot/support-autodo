@@ -527,6 +527,29 @@ div.options-menu input {
   background-color: #EEE;
 }
 
+/* Settings styles */
+div#settings h1 {
+  font-size: 15px;
+  padding: 3px 0px;
+}
+div#settings div.setting {
+  padding: 10px 0px;
+  border-bottom: 1px solid #EBEBEB;
+}
+div#settings p {
+  padding: 2px 0px;
+}
+div#settings .atd-button {
+  margin: 5px;
+}
+div#settings input[type="checkbox"] {
+  margin: 0px 5px 0px 0px;
+}
+div#settings td, div#settings th {
+  vertical-align: middle;
+  padding: 0px 10px 0px 0px;
+}
+
 /* jQuery UI styles */
 .ui-menu {
   list-style: none;

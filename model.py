@@ -26,6 +26,7 @@ from datetime import datetime
 from datetime import timedelta
 import email.utils
 import logging
+import os
 import re
 from sets import Set
 import urllib
@@ -35,6 +36,9 @@ from google.appengine.api import taskqueue
 from google.appengine.ext import db
 import simplejson
 import settings
+
+
+INCIDENT_DEEP_LINK = 'http://%s/#id=' % os.environ.get('HTTP_HOST', 'localhost')
 
 
 class Incident(db.Model):
@@ -80,8 +84,11 @@ class Incident(db.Model):
   trained_date = db.DateTimeProperty()
   training_review = db.BooleanProperty(default=True)
 
+  # Format used by the class for parsing dates.
+  ISO_FORMAT = '%Y-%m-%dT%H:%M:%S'
+
   @staticmethod
-  def MergeDefunct(parent_incident, children):
+  def MergeWithParent(parent_incident, children):
     """Merges multiple child incidents into one incident with a common parent.
 
     When child messages are delivered prior to their parent message (eg.
@@ -96,46 +103,42 @@ class Incident(db.Model):
     still under user review and editing.
 
     Sets parent_incident.training_review to True, assuming that the
-    MergeDefunct might have affected the tags.
+    MergeWithParent might have affected the tags.
 
     Args:
       parent_incident: Parent incident, referenced by each of the children.
       children: One or more messages referencing defunct parents.
     """
-    defunct_incidents = Set()
+    incidents_to_merge = Set()
     for child in children:
-      defunct_incidents.add(child.incident)
+      incidents_to_merge.add(child.incident)
       child.incident = parent_incident
       child.put()
 
-    # Make sure our JSON representation doesn't ignore the new messages.
     parent_incident.PurgeJsonCache()
     parent_incident.updated = datetime.utcnow()
     parent_incident.training_review = True
 
-    # Search for all other messages in defunct incidents, to merge them into
-    # the new incident.
-    for defunct_incident in defunct_incidents:
-      parent_incident.accepted_tags.extend(defunct_incident.accepted_tags)
-      parent_incident.suggested_tags.extend(defunct_incident.suggested_tags)
-      parent_incident.trained_tags.extend(defunct_incident.trained_tags)
-      parent_incident.trained_date = max([parent_incident.trained_date,
-                                          defunct_incident.trained_date])
-      messages = Message.gql('WHERE incident = :1', defunct_incident.key())
+    for incident in incidents_to_merge:
+      parent_incident.accepted_tags.extend(incident.accepted_tags)
+      parent_incident.suggested_tags.extend(incident.suggested_tags)
+      parent_incident.trained_tags.extend(incident.trained_tags)
+      parent_incident.trained_date = max([incident.trained_date,
+                                          incident.trained_date])
+      messages = Message.gql('WHERE incident = :1', incident.key())
       for message in messages:
         message.incident = parent_incident
         message.put()
 
-      # Then delete the incident if it's not the parent
-      if not parent_incident.key() == defunct_incident.key():
-        defunct_incident.delete()
+      if not parent_incident.key() == incident.key():
+        incident.delete()
 
     parent_incident.accepted_tags = list(set(parent_incident.accepted_tags))
     parent_incident.suggested_tags = list(set(parent_incident.suggested_tags))
     parent_incident.trained_tags = list(set(parent_incident.suggested_tags))
     parent_incident.put()
 
-  def Merge(self, other):
+  def Overlay(self, other):
     """Overwrite this incident's fields with other incident's fields.
 
     Records current time as time of update (incident.updated).
@@ -208,6 +211,34 @@ class Incident(db.Model):
     """
     return settings.MEMCACHE_VERSION_PREFIX + str(self.key().id())
 
+  def ToTaskDict(self, body=None):
+    """Parse an incident into a Tasks API dictionary.
+
+    Args:
+      body: Optional dictionary to update.
+    Returns:
+      Dictionary representing the incident.
+    """
+    body = body or {}
+    body['title'] = self.title
+    body['notes'] = self.GetDeepLink()
+    if self.resolved:
+      body['status'] = 'completed'
+      body['completed'] = self.GetDateTime(self.resolved)
+    else:
+      body['status'] = 'needsAction'
+      if 'completed' in body:
+        body.pop('completed')
+    return body
+
+  def GetDeepLink(self):
+    """Return a deeplink to the incident.
+
+    Returns:
+      Deeplink to the incident.
+    """
+    return '%s%s' % (INCIDENT_DEEP_LINK, self.key().id())
+
   @staticmethod
   def FromJson(json):
     """Convert the given JSON representation to an Incident.
@@ -224,7 +255,7 @@ class Incident(db.Model):
       Incident with all the properties of the given JSON representation.
     """
     retval = simplejson.loads(json)
-    incdt = Incident(
+    incident = Incident(
         title=retval.get('title'),
         owner=retval.get('owner'),
         status=retval.get('status'),
@@ -234,14 +265,14 @@ class Incident(db.Model):
         training_review=True,
         canonical_link=retval.get('canonical_link'))
     if retval.get('created') is not None:
-      incdt.created = Incident.ParseDate(retval.get('created'))
+      incident.created = Incident.ParseDate(retval.get('created'))
     if retval.get('updated') is not None:
-      incdt.updated = Incident.ParseDate(retval.get('updated'))
+      incident.updated = Incident.ParseDate(retval.get('updated'))
     if retval.get('resolved') is not None:
-      incdt.resolved = Incident.ParseDate(retval.get('resolved'))
+      incident.resolved = Incident.ParseDate(retval.get('resolved'))
     if retval.get('trained_date') is not None:
-      incdt.trained_date = Incident.ParseDate(retval.get('trained_date'))
-    return incdt
+      incident.trained_date = Incident.ParseDate(retval.get('trained_date'))
+    return incident
 
   @staticmethod
   def ParseDate(date_string):
@@ -253,14 +284,29 @@ class Incident(db.Model):
       Native datetime object.
     """
     if '.' in date_string:
-      (dt, microsecs) = date_string.split('.',1)
+      (dt, microsecs) = date_string.split('.', 1)
+      if len(microsecs) > 3:
+        microsecs = microsecs[:3]
     else:
       dt = date_string
       microsecs = 0
-    iso_format = '%Y-%m-%dT%H:%M:%S'
-    return_datetime = datetime.strptime(dt, iso_format)
+    return_datetime = datetime.strptime(dt, Incident.ISO_FORMAT)
     return_datetime += timedelta(microseconds=int(microsecs))
     return return_datetime
+
+  @staticmethod
+  def GetDateTime(time):
+    """Convert a datetime.datetime object to a Tasks API compatible string.
+
+    Args:
+      time: datetime.datetime to convert.
+    Returns:
+      String representing the datetime.datetime object.
+    """
+    date_str = time.isoformat()
+    if len(date_str.split('.')) == 1:
+      date_str += '.000'
+    return date_str + 'Z'
 
 
 class Message(db.Model):
@@ -307,26 +353,22 @@ class Message(db.Model):
     If the message is referenced by other incidents, merges those into
     the incident.
     """
-    # See if the message refers to an existing message.
     parent = Message.gql('WHERE message_id = :1', self.in_reply_to).get()
 
-    # If it does, add this to the incident.
     if parent and parent.incident:
       logging.debug('Parent found: ' + parent.incident.title)
       self.incident = parent.incident
       self.put()
 
-      # Make sure our JSON representation doesn't ignore the new message.
       parent.incident.PurgeJsonCache()
       parent.incident.updated = datetime.utcnow()
       parent.incident.training_review = True
       parent.incident.put()
 
-      # Then merge other incidents that point to this one, into this incident.
+      # Merge other incidents that point to this one, into this incident.
       children = Message.gql('WHERE in_reply_to = :1', self.message_id)
-      Incident.MergeDefunct(parent.incident, children)
+      Incident.MergeWithParent(parent.incident, children)
     else:
-      # The message may be the "root" of a existing incident...
       children = Message.gql('WHERE in_reply_to = :1 ORDER BY sent ASC',
                              self.message_id)
       if children.count():
@@ -348,8 +390,7 @@ class Message(db.Model):
         incident.canonical_link = self.canonical_link
         incident.put()
 
-        # Merge defunct incidents into master incident.
-        Incident.MergeDefunct(incident, children)
+        Incident.MergeWithParent(incident, children)
       else:
         logging.debug('New incident from: ' + self.message_id)
         # Or it must be a new incident...
@@ -454,7 +495,7 @@ class Message(db.Model):
     """Retrieves the functional In-Reply-To header.
 
     If an actual In-Reply-To header is not found, one will be constructed by
-    using the References header, if it exists.
+    using the last entry of the References header, if it exists.
 
     Args:
       mail: Incoming message to parse.
@@ -464,8 +505,6 @@ class Message(db.Model):
     """
     in_reply_to = mail.original.get('In-Reply-To')
 
-    # For rare clients that send References but no In-Reply-To, use the last
-    # References entry as the replied-to Message-ID.
     if not in_reply_to and references:
       in_reply_to = references[-1].split('\n')[-1].split(' ')[-1]
       logging.debug('Using last reference instead of In-Reply-To')
@@ -503,15 +542,13 @@ class Message(db.Model):
   def RecordMailingList(message):
     """Records existence of new mailing lists not previously recorded.
 
+    If the incoming message does not have a mailing list, this is a no-op.
+
     Args:
       message: Datastore representation of the incoming message.
     """
-    # Messages may not be sent from a mailing list, in which case this method
-    # does nothing.
     if message.mailing_list:
       logging.debug('Mailing-list: ' + message.mailing_list)
-      # Insert a copy of the list address into our List table if it's not
-      # already recorded. These are used for autocomplete in the UI.
       list_entry = List.gql('WHERE email = :1', message.mailing_list).get()
       if not list_entry:
         logging.debug('List not found, adding entry')
@@ -543,7 +580,6 @@ class Message(db.Model):
     Returns:
       Dict representing the incident.
     """
-    # Check for memcached copy first.
     key = self.GetJsonModelKey()
     cached = memcache.get(key)
     if cached and settings.USE_MEMCACHE_FOR_JSON_MODELS:
@@ -604,7 +640,7 @@ class Tag(db.Model):
   trained_date = db.DateTimeProperty()
 
   # _DEFAULT_MODEL is used when the user does not specify a model.
-  # This app uses this string to name a training set for the Predition
+  # This app uses this string to name a training set for the Prediction
   # API, creating a file on Google Storage with this prefix. This
   # string also appears on the User Settings page to describe the
   # model created when the user does not specify a model. You might
@@ -689,7 +725,7 @@ class Tag(db.Model):
     tags.update(incident.accepted_tags)
     for tag in tags:
       # Use negative example_count to signal a new tag.
-      tag_instance = cls.get_or_insert(tag, example_count=-1)
+      tag_instance = cls.get_or_insert(tag, example_count=(-1))
       if tag_instance.example_count < 0:
         tag_instance.example_count = 0
         tag_instance.put()
@@ -709,6 +745,43 @@ class Credentials(db.Model):
 
   @property
   def user_id(self):
+    return self.key().name()
+
+
+class UserSettings(db.Model):
+  """Store user's settings.
+
+  Attributes:
+    tasks_credentials: Tasks API scoped credentials.
+    email: User's email (also used as key).
+    add_to_tasks: Whether or not to automatically add assigned incidents to
+        the user's task list.
+    task_list_id: ID of the task list to add the incidents to.
+  """
+  tasks_credentials = CredentialsProperty()
+  add_to_tasks = db.BooleanProperty(default=False)
+  task_list_id = db.StringProperty(default='@default')
+
+  @property
+  def email(self):
+    return self.key().name()
+
+
+class IncidentTask(db.Model):
+  """Store link between an incident and a user's Task.
+
+  Attributes:
+    incident_id: ID of the incident (also used as key).
+    task_id: ID of the user's task.
+    task_list_id: ID of the user's task list.
+    owner: Owner of this IncidentTask.
+  """
+  task_id = db.StringProperty()
+  task_list_id = db.StringProperty(default='@default')
+  owner = db.StringProperty()
+
+  @property
+  def incident_id(self):
     return self.key().name()
 
 
@@ -769,7 +842,5 @@ class SuggestionModel(db.Model):
     Args:
       tags: list of Strings
     """
-    for tag in tags:
-      if Tag.ModelMatches(self.name, tag):
-        self.ui_tags.append(tag)
-    self.ui_tags = list(set(self.ui_tags))
+    ui_tags = [tag for tag in tags if Tag.ModelMatches(self.name, tag)]
+    self.ui_tags = list(set(ui_tags))

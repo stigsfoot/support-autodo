@@ -1,0 +1,6 @@
+Au-to-do is an example implementation of a ticket tracker, built using Google
+App Engine, Google Prediction API, Google Cloud Storage and the Google Apps
+APIs.
+
+For instructions on running your own instance of Au-to-do, see:
+http://code.google.com/p/au-to-do/wiki/GettingStarted

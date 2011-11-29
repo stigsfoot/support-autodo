@@ -14,11 +14,6 @@
 # limitations under the License.
 
 
-"""Provides interface to the Google Prediction API.
-
-This class provides suggested tags for Incidents and training sets for
-the Prediction API.
-"""
 
 
 
@@ -28,7 +23,9 @@ import re
 import string
 import StringIO
 import unicodedata
+from apiclient import errors
 from apiclient.discovery import build
+from oauth2client import client
 from google.appengine.ext import db
 from google.appengine.ext import webapp
 from google.appengine.ext.webapp.util import run_wsgi_app
@@ -81,7 +78,7 @@ def ConcatenateMessages(incident):
     Messages attached to an Incident.
   """
   messages = model.Message.gql('WHERE incident = :1', incident.key())
-  return ' '.join([message.body for message in messages])
+  return ' '.join(message.body for message in messages)
 
 
 def RefreshTagsAndModels():
@@ -101,7 +98,7 @@ def BuildCSVRow(incident, tag=None, recycled=None):
   This incident makes some expensive calls on text processing and
   data retrieval, so it returns all of the processed data in an
   "opaque" dictionary.  You can optionally pass this dictionary back
-  in to the function through saveblob if you would like to save on
+  in to the function through recycled if you would like to save on
   processing.
 
   Args:
@@ -118,7 +115,7 @@ def BuildCSVRow(incident, tag=None, recycled=None):
     String suitable for a row in the prediction (no tag) or
         training stream (with tag).
   """
-  if recycled is None:
+  if not recycled:
     recycled = {}
   if 'body' not in recycled:
     recycled['body'] = CleanText(ConcatenateMessages(incident))
@@ -127,7 +124,7 @@ def BuildCSVRow(incident, tag=None, recycled=None):
   if tag:
     # Tag should not be CleanText'd because it must match exactly.
     row_items.insert(0, tag)
-  return ','.join(['\"%s\"' % item for item in row_items])
+  return ','.join('\"%s\"' % item for item in row_items)
 
 
 def BuildCSVTrainingSet(model_name, write_file, tag_counts, training=False):
@@ -141,8 +138,12 @@ def BuildCSVTrainingSet(model_name, write_file, tag_counts, training=False):
         to update the incident statistics
 
   Returns:
-    Total number of examples in training set.
+    Tuple containing:
+      * the set of tags added to the training set.
+      * the list of incicdent used for training.
   """
+  added_tags = set()
+  trained_incidents = []
   model_tags = []
   tags = model.Tag.all()
 
@@ -159,21 +160,21 @@ def BuildCSVTrainingSet(model_name, write_file, tag_counts, training=False):
     logging.error('There are too many tags in %s to query with a single IN.',
                   model_name)
   incidents.filter('accepted_tags IN', model_tags)
-  tag_counts_total = 0
   for incident in incidents:
     processed_incident = {}
     for tag in incident.accepted_tags:
       if tag in model_tags:
+        added_tags.add(tag)
         if training:
           incident.trained_tags.append(tag)
         write_file.write(BuildCSVRow(incident, tag=tag,
                                      recycled=processed_incident))
         write_file.write('\n')
-        tag_counts_total += 1
         if tag in tag_counts:
           tag_counts[tag] += 1
         else:
           tag_counts[tag] = 1
+    trained_incidents.append(incident)
     if training:
       incident.trained_tags = list(set(incident.trained_tags))
       incident.updated = datetime.utcnow()
@@ -181,9 +182,8 @@ def BuildCSVTrainingSet(model_name, write_file, tag_counts, training=False):
       # incident.training_review should remain unchanged because we
       # only checked one model.  This incident may belong to multiple
       # models, some of which have already been trained.
-      incident.put()
 
-  return tag_counts_total
+  return (added_tags, trained_incidents)
 
 
 class Suggester(webapp.RequestHandler):
@@ -196,30 +196,30 @@ class Suggester(webapp.RequestHandler):
   def _SuggestTags(self, key, service):
     """Get suggestions for tags from the Prediction API.
 
+    Updates the Incident with one suggested tag for each model.
+
     Args:
       key: Model Key for Incident to receive suggested tags.
       service: Built API service class, pre-authorized for OAuth.
-
-    Returns:
-      Nothing.  Updates Incident in Datastore.
     """
     incident = db.get(key)
-    if incident is None:
+    if not incident:
       logging.error('_SuggestTags: No Incident with id=' + key)
     else:
       csv_instance = BuildCSVRow(incident)
       sample = {'input': {'csvInstance': [csv_instance]}}
-      bucket = settings.GS_BUCKET
       model_list = model.SuggestionModel.all()
       suggested = []
 
       for suggestion_model in model_list:
         if suggestion_model.training_examples:
-          full_name = '%s/%s' % (bucket, suggestion_model.training_file)
-          prediction = service.predict(body=sample, data=full_name).execute()
+          prediction = service.trainedmodels().predict(
+              id=suggestion_model.training_file, body=sample).execute()
           logging.info('Model:%s Prediction=%s', suggestion_model.name,
                        prediction)
-          suggested.append(prediction['outputLabel'])
+          # Only add labels that are not already assigned to the incident
+          if prediction['outputLabel'] not in incident.accepted_tags:
+            suggested.append(prediction['outputLabel'])
 
       if suggested:
         incident.suggested_tags = suggested
@@ -240,18 +240,18 @@ class Suggester(webapp.RequestHandler):
     """
     logging.info('Suggester.post')
     incident_key = self.request.get('incident_key')
-    if incident_key is None:
+    if not incident_key:
       logging.error('No incident_key provided')
       return
     else:
       incident_key = db.Key(incident_key)
       credentials = model.Credentials.get_by_key_name(
           settings.CREDENTIALS_KEYNAME)
-      if credentials is not None:
+      if credentials:
         credentials = credentials.credentials
         http = httplib2.Http()
         http = credentials.authorize(http)
-        service = build('prediction', 'v1.2', http=http)
+        service = build('prediction', 'v1.4', http=http)
         self._SuggestTags(incident_key, service)
 
 
@@ -298,11 +298,22 @@ class Trainer(webapp.RequestHandler):
           current_model = model.SuggestionModel.get_by_key_name(new_tag_model)
           gs_full_name = '%s/%s' % (settings.GS_BUCKET,
                                     current_model.training_file)
-          csv_instance = {'classLabel': new_tag, 'csvInstance': [example]}
+          csv_instance = {'label': new_tag, 'csvInstance': [example]}
           # TODO(user) Check training result for success.
-          training.update(data=gs_full_name,
-                          body=csv_instance).execute()
-          updated_incident.trained_tags.append(new_tag)
+          try:
+            training.update(
+                id=current_model.training_file, body=csv_instance).execute()
+            updated_incident.trained_tags.append(new_tag)
+          except errors.HttpError, error:
+            if 'Training running' not in error.content:
+              # Trained model insert failed, reset the training status for this
+              # tag.
+              logging.error(
+                  'Failed to retrieve trained model %s', new_tag_model)
+              current_model.training_examples = 0
+              current_model.put()
+          except client.AccessTokenRefreshError:
+            logging.error('Failed to update training set %s', gs_full_name)
 
       updated_incident.trained_tags = list(set(updated_incident.trained_tags))
       updated_incident.training_review = False
@@ -319,23 +330,28 @@ class Trainer(webapp.RequestHandler):
     for untrained_model in untrained_models:
       logging.info('UNTRAINED MODEL = ' + untrained_model.name)
       string_file = StringIO.StringIO()
-      example_count_total = BuildCSVTrainingSet(untrained_model.name,
-                                                string_file, tag_counts,
-                                                training=True)
-      if example_count_total:
-        gs_object_name = 'testing/' + untrained_model.name
-        gs_full_name = '%s/%s' % (settings.GS_BUCKET, gs_object_name)
-        body = {'id': gs_full_name}
-
-        storage.put_object(settings.GS_BUCKET, gs_object_name, string_file)
+      tags, trained_incidents = BuildCSVTrainingSet(
+          untrained_model.name, string_file, tag_counts, training=True)
+      if len(tags) > 1:
+        gs_object_name = untrained_model.name
+        gs_full_name = '%s/%s.csv' % (settings.GS_BUCKET, gs_object_name)
+        body = {
+            'id': gs_object_name,
+            'storageDataLocation': gs_full_name
+        }
+        storage.put_object(
+            settings.GS_BUCKET, gs_object_name + '.csv', string_file,
+            extra_headers={'x-goog-acl': 'project-private'})
         string_file.close()
         # TODO(user) check result for success
         training.insert(body=body).execute()
         untrained_model.training_file = gs_object_name
         untrained_model.training_date = datetime.utcnow()
-        untrained_model.training_examples = example_count_total
+        untrained_model.training_examples = len(trained_incidents)
         untrained_model.training_tags = tag_counts.keys()
         untrained_model.put()
+        for incident in trained_incidents:
+          incident.put()
 
     # Update the statistics in the related Tag
     for tag in tag_counts:
@@ -364,8 +380,8 @@ class Trainer(webapp.RequestHandler):
 
     tag_counts = {}
     temp_file = StringIO.StringIO()
-    example_count_total = BuildCSVTrainingSet(model_name, temp_file,
-                                              tag_counts)
+    _, trained_incidents = BuildCSVTrainingSet(model_name, temp_file,
+                                               tag_counts)
     self.response.out.write(temp_file.getvalue())
     temp_file.close()
 
@@ -379,17 +395,37 @@ class Trainer(webapp.RequestHandler):
     suggestion_model.export_date = now
     suggestion_model.export_tags = tag_counts.keys()
     suggestion_model.ui_tags = suggestion_model.export_tags
-    suggestion_model.export_examples = example_count_total
+    suggestion_model.export_examples = len(trained_incidents)
     suggestion_model.put()
+
+  def _Refresh(self):
+    """Force a new training set for all tags."""
+    RefreshTagsAndModels()
+    credentials = model.Credentials.get_by_key_name(
+        settings.CREDENTIALS_KEYNAME)
+    if credentials:
+      credentials = credentials.credentials
+      http = httplib2.Http()
+      http = credentials.authorize(http)
+      service = build('prediction', 'v1.4', http=http)
+      train = service.trainedmodels()
+      self._UpdateTraining(train)
+
+  def get(self):
+    """Private endpoint for Cron job automatic training."""
+    if self.request.headers.get('X-AppEngine-Cron') == 'true':
+      logging.info('Refreshing tags training set from Cron job.')
+      self._Refresh()
+    else:
+      self.redirect('/')
 
   def post(self):
     """Process requests to train or for training data.
 
     Possible requests:
-    action=train: force a new training set for all tags with sufficient
-    Examples.
-    action=status: report on the training status for all tags.
-    action=create: generate a set of terms from an Incident for each tag.
+    action=refresh: force a new training set for all tags with sufficient
+    Examples. Creates models as needed.
+    action=csv: download a comma-separated version of the given model.
     """
     action = self.request.get('action')
     model_name = self.request.get('model_name')
@@ -397,16 +433,7 @@ class Trainer(webapp.RequestHandler):
     if action == 'csv':
       self._DownloadCSV(model_name)
     elif action == 'refresh':
-      RefreshTagsAndModels()
-      credentials = model.Credentials.get_by_key_name(
-          settings.CREDENTIALS_KEYNAME)
-      if credentials is not None:
-        credentials = credentials.credentials
-        http = httplib2.Http()
-        http = credentials.authorize(http)
-        service = build('prediction', 'v1.2', http=http)
-        train = service.training()
-        self._UpdateTraining(train)
+      self._Refresh()
       self.redirect('/')
 
 

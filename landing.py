@@ -33,9 +33,8 @@ class LandingPage(webapp.RequestHandler):
     """Render the landing page."""
     user = users.get_current_user()
     if user:
-      owner = user.email().split('@')[0]
       template_values = {
-          'owner': owner,
+          'owner': user.email(),
           # Retrieve the list of filters to add as autocomplete params.
           'filters': [x[0] for x in INCIDENT_FILTERS],
       }

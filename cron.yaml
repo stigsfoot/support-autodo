@@ -1,0 +1,4 @@
+cron:
+- description: Automatic incident training
+  url: /tasks/train
+  schedule: every 15 minutes

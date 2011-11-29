@@ -28,6 +28,7 @@
     {% for filter in filters %}
     filters.push("{{filter}}=");
     {% endfor %}
+    filters.push("id=");
     var currentUser = '{{ owner }}';
   </script>
 </head>

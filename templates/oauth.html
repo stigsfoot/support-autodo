@@ -4,9 +4,12 @@
     <title>Au-to-do</title>
     <script type="text/javascript">
       function closeWindow() {
-        if (window.opener &&
-            typeof(window.opener.onAccessGranted) == 'function') {
-          window.opener.onAccessGranted();
+        if (window.opener) {
+          if (typeof(window.opener.onAccessGranted) == 'function') {
+            window.opener.onAccessGranted();
+          } else if (typeof(window.opener.google.devrel.samples.autodo.Util.onAccessGranted) == 'function') {
+            window.opener.google.devrel.samples.autodo.Util.onAccessGranted();
+          }
           window.close();
         } else {
           window.location = "/";

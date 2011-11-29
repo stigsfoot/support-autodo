@@ -1,10 +1,13 @@
-application: your_application_id
+application: your-application-id
 version: 1
 runtime: python
 api_version: 1
 
 inbound_services:
 - mail
+
+
+
 
 handlers:
 - url: /images
@@ -31,7 +34,7 @@ handlers:
   script: aggregator/mail.py
   login: admin
 
-- url: /resources/v1/incidents.*
+- url: /resources/v1/.*
   script: api/handler.py
 
 - url: /oauth.*
